@@ -1,11 +1,16 @@
 # annot Claude Code hooks
 
-Two `PostToolUse` hooks that wire `annot` into a Claude Code session:
+Three hooks that wire `annot` into a Claude Code session:
 
-- `annot-context.sh` — after a `Read`, injects live `decision`/`gotcha`
+- `annot-context.sh` — `PostToolUse(Read)`: injects live `decision`/`gotcha`
   annotations for the file just read as `additionalContext`.
-- `annot-sync.sh` — after an `Edit` or `Write`, re-syncs that file's
-  annotation anchors against the change (fire-and-forget, no output).
+- `annot-sync.sh` — `PostToolUse(Edit|Write|MultiEdit|NotebookEdit)`:
+  re-syncs that file's annotation anchors against the change
+  (fire-and-forget, no output).
+- `annot-sync-all.sh` — `Stop`: repo-wide safety net. Runs once at the end
+  of every turn and re-syncs every annotated file in the repo, catching
+  drift from any write the matcher above didn't (fire-and-forget, no
+  output). See Limitations below for exactly what it covers.
 
 ## Install
 
@@ -21,15 +26,15 @@ Two `PostToolUse` hooks that wire `annot` into a Claude Code session:
 3. Merge the contents of `hooks/settings.json` into your project's
    `.claude/settings.json` (or `~/.claude/settings.json` for a user-wide
    install). It is a **snippet**, not a full settings file — if you already
-   have a `hooks.PostToolUse` array, append these two matcher entries to it
-   rather than overwriting the file. It references the hook scripts via
+   have a `hooks.PostToolUse` or `hooks.Stop` array, append these entries to
+   it rather than overwriting the file. It references the hook scripts via
    `${CLAUDE_PROJECT_DIR}/hooks/...`, so keep this `hooks/` directory at the
    project root, or adjust the paths.
 
 4. Make the scripts executable if the permission bit didn't survive the copy:
 
    ```sh
-   chmod +x hooks/annot-context.sh hooks/annot-sync.sh
+   chmod +x hooks/annot-context.sh hooks/annot-sync.sh hooks/annot-sync-all.sh
    ```
 
 ## Verify it's working
@@ -44,6 +49,11 @@ least one `annot add`-ed annotation:
    `annot get <file> --format=json` yourself and confirm the anchor's
    `start`/`end` shifted to match — that proves `annot-sync.sh` fired on the
    edit.
+3. To see the `Stop` catch-all specifically: drift an annotation through a
+   path the matcher doesn't cover (e.g. edit the file via `Bash`/`sed`
+   instead of `Edit`/`Write`), let Claude finish its turn, then check
+   `annot get <file> --format=json` again — `annot-sync-all.sh` should have
+   healed it even though no `PostToolUse` hook fired for that write.
 
 ### One-liner smoke test (no live session needed)
 
@@ -61,29 +71,45 @@ the pipeline works end to end (jq found, annot found, repo discovered,
 annotations found). Empty stdout means one of those links is missing —
 see Limitations below for how to tell which.
 
+The `Stop` hook can be smoke-tested the same way, minus the `jq` assertion
+(it produces no output on success):
+
+```sh
+CLAUDE_PROJECT_DIR=/abs/path/to/repo hooks/annot-sync-all.sh </dev/null
+echo "exit: $?"   # should be 0 regardless of whether anything needed syncing
+```
+
+## Behavior notes
+
+- **Context lands right after the file body, in the same turn.** `PostToolUse`
+  fires after the tool runs, so the very first `Read` of a file gets its
+  `additionalContext` injected immediately after that tool result — the
+  model reads the file body and then, still in the same turn, the
+  `decision`/`gotcha` annotations for it. That's the natural read order
+  (code, then annotations about the code), not a gap to work around.
+
 ## Limitations
 
-- **Only `Read`/`Edit`/`Write` are wired.** Any writing tool not literally
-  named `Edit` or `Write` (e.g. `NotebookEdit`, and `MultiEdit` on Claude
-  Code versions that expose it) never triggers `annot-sync.sh` — nor do
-  custom MCP tools, `Bash` redirection, etc. — so annotations on files
-  touched only through those paths can drift until something else (a later
-  `Read`, or a manual `annot sync`) resyncs them.
-- **PostToolUse fires after the tool runs.** The very first `Read` of a
-  file in a session gets its context injected on schedule, but a hook can
-  never affect the tool call that triggered it — there is no way to warn
-  Claude about a file's annotations *before* it reads the file for the
-  first time.
-- **Silent degradation is deliberate but opaque.** Both scripts exit 0 and
-  print nothing on every failure path (missing `annot`/`jq` on `PATH`, file
-  outside a git repo, `annot get`/`annot sync` erroring, no matching
-  annotations). This is required so a broken install never breaks a Claude
-  Code session — but it also means "no annotations ever show up" and
-  "everything is fine, this file just has none" look identical from inside
-  the session. Use the smoke test above to tell them apart when in doubt.
+- **The `PostToolUse` matcher only catches tools literally named
+  `Edit`/`Write`/`MultiEdit`/`NotebookEdit`.** Custom MCP tools, `Bash`
+  redirection/codemods, or a future tool name not yet added to the matcher
+  all bypass `annot-sync.sh`. This used to mean such drift could persist
+  indefinitely; now the `Stop` hook (`annot-sync-all.sh`) runs a repo-wide
+  `annot sync` at the end of every turn, so the residual exposure window is
+  only: a tool that (a) writes files, (b) isn't named in the matcher, and
+  (c) only until the turn's `Stop` event fires — at most one turn's worth
+  of drift, not indefinite.
+- **Silent degradation is deliberate but opaque.** All three scripts exit 0
+  and print nothing on every failure path (missing `annot`/`jq` on `PATH`,
+  file or directory outside a git repo, `annot get`/`annot sync` erroring,
+  no matching annotations). This is required so a broken install never
+  breaks a Claude Code session — but it also means "no annotations ever
+  show up" and "everything is fine, this file just has none" look
+  identical from inside the session. Use the smoke tests above to tell
+  them apart when in doubt.
 - **No verification inside a live Claude Code session was performed** as
   part of building this integration — Claude Code cannot run inside
-  itself. The pipe-level smoke test above (fabricated `PostToolUse` stdin
-  through the scripts, asserted with `jq`) is the verification that exists;
-  it exercises the exact stdin shape and stdout contract the docs specify,
-  but not Claude Code's actual hook dispatch.
+  itself. The pipe-level smoke tests above (fabricated `PostToolUse`/`Stop`
+  stdin through the scripts) are the verification that exists; they
+  exercise the exact stdin shape and stdout contract the docs specify, but
+  not Claude Code's actual hook dispatch.

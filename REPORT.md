@@ -1,15 +1,16 @@
 # annot — build report
 
 Built per PROMPT.md via orchestrated subagent waves. Final state: `cargo test --workspace`
-109 passed / 0 failed, `cargo clippy --workspace --all-targets -- -D warnings` clean,
-`cargo fmt --check` clean, `scripts/e2e.sh` ⇒ E2E PASS. Nothing committed to git.
+120 passed / 0 failed, `cargo clippy --workspace --all-targets -- -D warnings` clean,
+`cargo fmt --check` clean, `scripts/e2e.sh` ⇒ E2E PASS.
 
 ## What was built
 
 - `crates/annot-core` — `model.rs` (Record/Anchor/Kind/Status, serde schema matching the
   spec field-for-field, hand-rolled RFC 3339 ms timestamps), `store.rs` (JSONL mirror
   store under `.annot/`, shared-lock appends, exclusive-lock atomic compaction,
-  thiserror `StoreError`), `sync.rs` (blob anchoring via gix ODB, imara-diff Histogram
+  thiserror `StoreError`), `sync.rs` (blob anchoring with a content-addressed
+  `.annot/blobs/` cache + gix ODB read fallback, imara-diff Histogram
   remap, integer basis-point fuzzy re-match 0.70/0.15/0.15 with accept ≥0.60 (≥0.80 for
   ≤2-line anchors), orphaning, opportunistic write-back via `sync_path`/`sync_tree`).
 - `crates/annot-cli` — binary `annot`: add/get/sync/orphans/resolve/compact, deterministic
@@ -18,8 +19,11 @@ Built per PROMPT.md via orchestrated subagent waves. Final state: `cargo test --
   tests, 9 end-to-end drift/persistence tests, 31 black-box CLI tests, fixture templates
   (`tests/fixtures/`) + `FixtureRepo` harness.
 - `hooks/` — PostToolUse scripts (context injection via `hookSpecificOutput.additionalContext`,
-  silent-degradation design), mergeable `settings.json` snippet, README with install +
-  limitations. `skill/SKILL.md` — authoring discipline, kind guide, promotion policy.
+  silent-degradation design), a Stop-hook repo-wide sync catch-all, mergeable
+  `settings.json` snippet, README with install + limitations. `skill/SKILL.md` —
+  authoring discipline, kind guide, promotion policy. Records/anchors round-trip
+  unknown JSON fields (`#[serde(flatten)]`), so older binaries cannot destroy newer
+  data on `compact`.
 - `scripts/e2e.sh` — the Definition-of-done walkthrough (shift + orphan cases).
 
 Two adversarial Opus review passes ran (sync engine; CLI/hooks/DoD). All confirmed
@@ -32,9 +36,14 @@ context-delimiter spoofing, `sync <dir>` false success, token-budget separator o
 1. **Appends take a shared fs4 lock** (spec: "plain appends need no lock") — user-approved.
    A lockless append racing compaction's rewrite+rename is silently lost; the shared/
    exclusive split closes the window at one syscall per append.
-2. **`annot add` and heals write loose blobs into the git ODB** — user-approved. The old
-   content must be retrievable for diffing even when never committed (dirty worktree).
-   `git gc` can prune them (~2-week grace); sync then degrades to hash-only re-match.
+2. **Old content is persisted in a content-addressed cache at `.annot/blobs/<oid>`**
+   (initially shipped as loose-blob writes into the git ODB, user-approved; reworked on
+   review to keep annot writing only inside its own directory). The old content must be
+   retrievable for diffing even when never committed (dirty worktree). The cache is
+   gc-independent, written atomically at anchor/heal time, pruned by `annot compact`
+   (never when any mirror is malformed), and the git ODB serves as a read-only fallback
+   for content that happens to be committed. `base_blob` remains a standard git blob
+   SHA-1, so the record schema is unchanged.
 3. **`orig_snippet` is captured eagerly** at anchor time and refreshed on heal (spec:
    "stored when orphaned") — the only variant robust to gc-pruned blobs; orphaning still
    preserves it, satisfying the spec's intent.
@@ -68,13 +77,16 @@ context-delimiter spoofing, `sync <dir>` false success, token-budget separator o
 
 ## Known gaps
 
-- Compaction strips JSON fields unknown to the current schema (no passthrough).
-- Hooks match only tools literally named `Read` / `Edit|Write` — NotebookEdit (and
-  MultiEdit where it exists) never triggers sync; first Read in a session precedes its
-  own injected context (PostToolUse is post-hoc).
+- Fuzzy re-match models internal drift as ONE contiguous gap (±2 lines): two separate
+  insertions inside an anchor undercount matches and tend to orphan rather than
+  mis-anchor — conservative by design, but real moves with scattered internal edits
+  orphan more than strictly necessary.
+- Sync triggers on tools matched by `Edit|Write|MultiEdit|NotebookEdit` plus a Stop-hook
+  repo-wide catch-all; a writing tool outside that set drifts only until the next Stop.
 - O_APPEND atomicity assumed (local filesystems; NFS caveat).
-- gc-pruned blobs silently downgrade diff-precision healing to fuzzy re-match.
-- "Periodic" compaction is manual (`annot compact`).
+- "Periodic" compaction is manual (`annot compact`; the Stop hook syncs but does not
+  compact).
+- `.annot/blobs/` grows with anchors and heals between compactions.
 - `symbol` is pass-through only. CRLF files keep a dangling `\r` on the snippet's last
   line. `hunk_cache` is a linear scan (O(n²) for many-annotation files).
   `Syncer::sync_file`/`make_anchor` trust `rel_path` (the CLI path goes through
@@ -86,6 +98,5 @@ context-delimiter spoofing, `sync <dir>` false success, token-budget separator o
 
 tree-sitter symbol anchors (auto-populate + verify `symbol`); MCP frontend;
 `annot compact` summarization of history records; rename re-homing via content-similarity
-mirror relocation; `refs/annot/` keep-refs to shield ODB blobs from gc; unknown-field
-passthrough for forward compatibility; `--no-heal` read-only mode for CI checkouts;
-gap tolerance proportional to anchor size (max(2, k/10)).
+mirror relocation; `--no-heal` read-only mode for CI checkouts; gap tolerance
+proportional to anchor size (max(2, k/10)) and a multi-gap alignment model.

@@ -557,6 +557,30 @@ fn compact_summary_golden_line() {
 }
 
 #[test]
+fn compact_summary_reports_pruned_blobs() {
+    let repo = Repo::new();
+    repo.write("src/p.rs", &numbered_lines_with_prefix("line", 20));
+    add(&repo, "src/p.rs", "10:11", "decision", "keep me", None);
+
+    // Healing re-anchors the record onto new bytes, orphaning the blob the
+    // original anchor was taken against.
+    repo.write(
+        "src/p.rs",
+        &format!("inserted\n{}", numbered_lines_with_prefix("line", 20)),
+    );
+    repo.cmd().arg("sync").assert().success();
+    let blobs = repo.path().join(".annot/blobs");
+    assert_eq!(fs::read_dir(&blobs).unwrap().count(), 2);
+
+    let out = stdout_of(repo.cmd().arg("compact").assert().success());
+    assert_eq!(
+        out,
+        "compacted 1 file(s): 1 kept, 1 dropped, 1 blob(s) pruned\n"
+    );
+    assert_eq!(fs::read_dir(&blobs).unwrap().count(), 1);
+}
+
+#[test]
 fn outside_git_repo_errors_exit_1_naming_the_problem() {
     let dir = tempfile::tempdir().unwrap();
     let mut cmd = Command::cargo_bin("annot").unwrap();

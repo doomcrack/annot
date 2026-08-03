@@ -41,7 +41,10 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// A single annotation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Unknown JSON fields are preserved verbatim in [`Record::extra`] so an older
+/// binary never destroys data written by a newer one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Record {
     pub id: Ulid,
     pub kind: Kind,
@@ -52,6 +55,9 @@ pub struct Record {
     pub orig_snippet: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Fields this version does not know about, round-tripped unchanged.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Record {
@@ -67,6 +73,7 @@ impl Record {
             orig_snippet: None,
             created_at: now.clone(),
             updated_at: now,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -89,7 +96,10 @@ impl Record {
 }
 
 /// The anchored code location an annotation is attached to.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Unknown JSON fields are preserved verbatim in [`Anchor::extra`], as for
+/// [`Record`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Anchor {
     pub base_blob: String,
     pub start: u32,
@@ -99,6 +109,9 @@ pub struct Anchor {
     pub ctx_after: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+    /// Fields this version does not know about, round-tripped unchanged.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Anchor {
@@ -210,6 +223,7 @@ mod tests {
             ctx_before: "fedcba9876543210".to_string(),
             ctx_after: "1111111111111111".to_string(),
             symbol: Some("fn parse_expr".to_string()),
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -275,14 +289,21 @@ mod tests {
     }
 
     #[test]
-    fn unknown_json_field_tolerated() {
+    fn unknown_json_fields_round_trip_instead_of_being_dropped() {
         let mut value = spec_example_json();
         value
             .as_object_mut()
             .unwrap()
-            .insert("future_field".to_string(), serde_json::json!("ignored"));
-        let record: Result<Record, _> = serde_json::from_value(value);
-        assert!(record.is_ok());
+            .insert("reviewed_by".to_string(), serde_json::json!("x"));
+        value["anchor"]
+            .as_object_mut()
+            .unwrap()
+            .insert("v2_field".to_string(), serde_json::json!(7));
+
+        let record: Record = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(record.extra["reviewed_by"], serde_json::json!("x"));
+        assert_eq!(record.anchor.extra["v2_field"], serde_json::json!(7));
+        assert_eq!(serde_json::to_value(&record).unwrap(), value);
     }
 
     #[test]

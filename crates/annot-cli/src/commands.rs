@@ -281,6 +281,9 @@ fn compact(store: &Store) -> Result<()> {
     if stats.files_skipped > 0 {
         line.push_str(&format!(", {} skipped (malformed)", stats.files_skipped));
     }
+    if stats.blobs_pruned > 0 {
+        line.push_str(&format!(", {} blob(s) pruned", stats.blobs_pruned));
+    }
     println!("{line}");
     if stats.files_skipped > 0 {
         std::process::exit(1);

@@ -51,6 +51,20 @@ impl Fixture {
             .sync_annotation(Path::new(rel), record)
             .unwrap_or_else(|e| panic!("sync_annotation({rel}) failed: {e}"))
     }
+
+    /// Where annot's own content-addressed cache keeps the bytes named by `hex`.
+    fn blob_cache(&self, hex: &str) -> PathBuf {
+        self.store.repo_root().join(".annot/blobs").join(hex)
+    }
+}
+
+/// Runs `git <args>` in the fixture repo, reporting whether it succeeded.
+fn git(root: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .is_ok_and(|out| out.status.success())
 }
 
 // Lines `start..=end` (1-based inclusive) of a fixture-repo file, `\n`-joined.
@@ -407,6 +421,133 @@ fn hash_only_path_rematches_when_the_base_blob_is_gone() {
         } => assert_eq!((new_start, new_end), (37, 47)),
         other => panic!("expected Rematched 37-47 without the old blob, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The `.annot/blobs` content-addressed cache
+// ---------------------------------------------------------------------------
+
+#[test]
+fn make_anchor_caches_the_exact_file_bytes() {
+    let f = Fixture::new();
+    f.repo.write_fixture(SRC, "base.rs.txt");
+    let record = f.anchor(SRC, ANCHOR_START, ANCHOR_END);
+
+    let cached = f.blob_cache(&record.anchor.base_blob);
+    assert!(
+        cached.is_file(),
+        "make_anchor must cache the anchored bytes"
+    );
+    assert_eq!(
+        fs::read(&cached).unwrap(),
+        fs::read(f.source(SRC)).unwrap(),
+        "the cache entry holds the file bytes verbatim"
+    );
+
+    // The cache lives under `.annot/` but is not a mirror.
+    f.store.append(f.source(SRC), &record).unwrap();
+    assert_eq!(
+        f.store.list_annotated_files().unwrap(),
+        vec![PathBuf::from(SRC)]
+    );
+}
+
+#[test]
+fn healing_caches_the_new_file_bytes() {
+    let f = Fixture::new();
+    f.repo.write_fixture(SRC, "base.rs.txt");
+    let mut record = f.anchor(SRC, ANCHOR_START, ANCHOR_END);
+    let base_blob = record.anchor.base_blob.clone();
+
+    f.repo.write_fixture(SRC, "edit_above.rs.txt");
+    assert_eq!(f.sync(SRC, &mut record), SyncOutcome::Shifted { delta: 5 });
+
+    assert_ne!(record.anchor.base_blob, base_blob);
+    assert_eq!(
+        fs::read(f.blob_cache(&record.anchor.base_blob)).unwrap(),
+        fs::read(f.source(SRC)).unwrap()
+    );
+    assert!(
+        f.blob_cache(&base_blob).is_file(),
+        "the superseded entry stays until compaction prunes it"
+    );
+
+    // A further heal caches the next revision's bytes too.
+    f.repo.write_fixture(SRC, "edit_below.rs.txt");
+    assert_eq!(f.sync(SRC, &mut record), SyncOutcome::Shifted { delta: -5 });
+    assert_eq!(
+        fs::read(f.blob_cache(&record.anchor.base_blob)).unwrap(),
+        fs::read(f.source(SRC)).unwrap()
+    );
+}
+
+#[test]
+fn the_diff_path_survives_git_gc() {
+    let f = Fixture::new();
+    f.repo.write_fixture(SRC, "base.rs.txt");
+    let mut record = f.anchor(SRC, ANCHOR_START, ANCHOR_END);
+    if !git(f.repo.root(), &["gc", "--prune=now"]) {
+        return; // no usable git gc here; nothing to prove
+    }
+
+    f.repo.write_fixture(SRC, "edit_above.rs.txt");
+    // The hash-only fallback can only ever report `Rematched`; `Shifted` proves
+    // the old bytes were still there to diff against after a full gc.
+    assert_eq!(f.sync(SRC, &mut record), SyncOutcome::Shifted { delta: 5 });
+    assert_eq!((record.anchor.start, record.anchor.end), (37, 47));
+}
+
+#[test]
+fn committed_content_still_diffs_when_the_cache_entry_is_gone() {
+    let f = Fixture::new();
+    f.repo.write_fixture(SRC, "base.rs.txt");
+    assert!(git(f.repo.root(), &["add", SRC]), "git add failed");
+    assert!(
+        git(
+            f.repo.root(),
+            &[
+                "-c",
+                "user.email=annot@example.invalid",
+                "-c",
+                "user.name=annot tests",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        ),
+        "git commit failed"
+    );
+
+    let mut record = f.anchor(SRC, ANCHOR_START, ANCHOR_END);
+    fs::remove_file(f.blob_cache(&record.anchor.base_blob)).unwrap();
+
+    f.repo.write_fixture(SRC, "edit_above.rs.txt");
+    // Cache miss, object database hit: still the diff path, not hash-only.
+    assert_eq!(f.sync(SRC, &mut record), SyncOutcome::Shifted { delta: 5 });
+    assert_eq!((record.anchor.start, record.anchor.end), (37, 47));
+}
+
+#[test]
+fn healing_preserves_unknown_record_and_anchor_fields() {
+    let f = Fixture::new();
+    f.repo.write_fixture(SRC, "base.rs.txt");
+    let mut record = f.anchor(SRC, ANCHOR_START, ANCHOR_END);
+    record
+        .extra
+        .insert("reviewed_by".to_string(), serde_json::json!("x"));
+    record
+        .anchor
+        .extra
+        .insert("v2_field".to_string(), serde_json::json!(7));
+
+    f.repo.write_fixture(SRC, "edit_above.rs.txt");
+    assert_eq!(f.sync(SRC, &mut record), SyncOutcome::Shifted { delta: 5 });
+
+    assert_eq!(record.extra["reviewed_by"], serde_json::json!("x"));
+    assert_eq!(record.anchor.extra["v2_field"], serde_json::json!(7));
 }
 
 // ---------------------------------------------------------------------------

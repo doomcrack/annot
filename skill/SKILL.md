@@ -90,9 +90,11 @@ annot get src/sync.rs --format=context --kinds decision,gotcha --max-tokens 800
 # Full JSON (e.g. to inspect anchor state, not just render text).
 annot get src/sync.rs --format=json
 
-# After an edit, resync explicitly (the PostToolUse(Edit|Write) hook does
-# this automatically for Edit/Write — do it by hand after anything the
-# hooks don't cover, e.g. a Bash-driven codemod or NotebookEdit).
+# After an edit, resync explicitly (the PostToolUse(Edit|Write|MultiEdit|
+# NotebookEdit) hook does this automatically for those tools, and the Stop
+# hook resyncs the whole repo as a catch-all at the end of every turn — do
+# it by hand for anything that can't wait that long, e.g. right after a
+# Bash-driven codemod, before reading the result back).
 annot sync src/sync.rs
 ```
 
@@ -127,16 +129,20 @@ Run `annot compact` occasionally (merges duplicate ids left behind by
 resolve/append churn, drops tombstones) to keep the `.annot/` mirror lean —
 it's append-only JSONL day to day, so it only grows until compacted.
 
-## Caveat: `git gc` degrades anchor healing, never deletes annotations
+## Blob cache: where old content lives for anchor healing
 
-`annot add`/`resolve` write the anchored file's full content into the git
-object database as a loose blob, purely so the sync engine can diff old vs.
-new content precisely on the next read. That blob is unreferenced by any
-commit or ref, which makes it exactly the kind of object `git gc` prunes.
-If it gets pruned, re-anchoring after drift falls back to weaker signal
-(the stored line hashes and context hashes alone, no full diff) — lower
-confidence, more likely to orphan instead of cleanly re-matching. The
+`annot add`/`resolve` write the anchored file's full content into a
+content-addressed cache at `.annot/blobs/<oid>`, purely so the sync engine
+can diff old vs. new content precisely on the next read. This cache is
+entirely annot's own — it never touches `.git`'s object database, so
+`git gc` has nothing to do with it and old-content retrieval is
+gc-independent (the git ODB is still consulted as a read fallback when a
+blob predates this cache or was pruned from it, but nothing about
+`annot`'s own writes depends on git's pruning behavior). `.annot/blobs/`
+grows with every anchor and heal, same append-only shape as the JSONL
+mirror; run `annot compact` occasionally to prune it back down. The
 annotation's own text (`body`, `orig_snippet`) lives in the `.annot/`
-JSONL mirror, not in the git object database, so `git gc` can never lose
-the annotation itself — worst case it orphans and you `--reanchor` it by
-hand.
+JSONL mirror regardless, so even a fully pruned blob cache can never lose
+the annotation itself — worst case a drifted anchor falls back to weaker
+signal (stored line/context hashes alone, no full diff), is more likely to
+orphan, and you `--reanchor` it by hand.
