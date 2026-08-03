@@ -1,0 +1,17 @@
+[package]
+name = "annot-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+gix = { workspace = true }
+imara-diff = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true, features = ["serde"] }
+fs4 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

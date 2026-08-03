@@ -1,0 +1,19 @@
+[package]
+name = "annot-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "annot"
+path = "src/main.rs"
+
+[dependencies]
+annot-core = { path = "../annot-core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+tempfile = { workspace = true }
